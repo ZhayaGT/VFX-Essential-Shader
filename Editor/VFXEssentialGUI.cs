@@ -2334,7 +2334,6 @@ public class VFXEssentialGUI : ShaderGUI
     //       Custom Data enabled: Color, Custom1.xyzw, Custom2.xyzw, AnimFrame
     // ────────────────────────────────────────────────────────────────────────
     readonly List<ParticleSystemRenderer> _psRenderers = new List<ParticleSystemRenderer>();
-    readonly List<bool> _psCustomStreamsOn = new List<bool>();   // Whether Custom Vertex Streams is enabled on each Renderer.
     Material _psRenderersMat;
     double   _psRenderersTime = -1.0;
 
@@ -2348,14 +2347,10 @@ public class VFXEssentialGUI : ShaderGUI
         _psRenderersMat  = mat;
         _psRenderersTime = now;
         _psRenderers.Clear();
-        _psCustomStreamsOn.Clear();
         foreach (var r in UnityEngine.Object.FindObjectsByType<ParticleSystemRenderer>(FindObjectsInactive.Include, FindObjectsSortMode.None))
         {
             if (r.sharedMaterial != mat) continue;
             _psRenderers.Add(r);
-            // GetActiveVertexStreams returns the last stored list even when Custom Vertex Streams is off, so read the toggle separately.
-            var prop = new SerializedObject(r).FindProperty("m_UseCustomVertexStreams");
-            _psCustomStreamsOn.Add(prop == null || prop.boolValue);
         }
     }
 
@@ -2370,8 +2365,55 @@ public class VFXEssentialGUI : ShaderGUI
         s == ParticleSystemVertexStream.UV  || s == ParticleSystemVertexStream.UV2 ||
         s == ParticleSystemVertexStream.UV3 || s == ParticleSystemVertexStream.UV4;
 
+    // Mesh + GPU Instancing is the layout-sensitive path. Do not consult supportsMeshInstancing here: it reports false on
+    // renderers that still render instanced (it is a capability hint, not the active path), and gating on it silently
+    // skipped validation for exactly the renderers that were broken.
     static bool IsMeshInstanced(ParticleSystemRenderer r) =>
-        r.renderMode == ParticleSystemRenderMode.Mesh && r.enableGPUInstancing && r.supportsMeshInstancing;
+        r.renderMode == ParticleSystemRenderMode.Mesh && r.enableGPUInstancing;
+
+    // GetActiveVertexStreams returns the last stored list even when Custom Vertex Streams is off, so read the toggle separately.
+    static bool CustomStreamsOn(ParticleSystemRenderer r)
+    {
+        var prop = new SerializedObject(r).FindProperty("m_UseCustomVertexStreams");
+        return prop == null || prop.boolValue;
+    }
+
+    static void SetCustomStreamsOn(ParticleSystemRenderer r)
+    {
+        var so = new SerializedObject(r);
+        var prop = so.FindProperty("m_UseCustomVertexStreams");
+        if (prop == null || prop.boolValue) return;
+        prop.boolValue = true;
+        so.ApplyModifiedPropertiesWithoutUndo();
+    }
+
+    // UI-free detection so the same rules can be asserted from tests and from the fix button.
+    static void CollectStreamProblems(Material mat, List<ParticleSystemRenderer> bad, List<ParticleSystemRenderer> badInstanced)
+    {
+        bad.Clear();
+        badInstanced.Clear();
+        bool cdOn = mat.IsKeywordEnabled("_USECUSTOMDATA_ON");
+        var required          = RequiredStreams();
+        var requiredInstanced = RequiredInstancedStreams(cdOn);
+
+        foreach (var r in UnityEngine.Object.FindObjectsByType<ParticleSystemRenderer>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (r == null || r.sharedMaterial != mat) continue;
+            bool customStreamsOn = CustomStreamsOn(r);
+            r.GetActiveVertexStreams(s_ActiveStreams);
+
+            if (IsMeshInstanced(r))
+            {
+                // Custom Vertex Streams off = Unity's default layout (Color, AnimFrame), which matches only when Custom Data is disabled.
+                bool ok = customStreamsOn ? InstancedStreamsMatch(requiredInstanced, s_ActiveStreams) : !cdOn;
+                if (!ok) badInstanced.Add(r);
+            }
+            else if (cdOn)
+            {
+                if (!customStreamsOn || !StreamsMatch(required, s_ActiveStreams)) bad.Add(r);
+            }
+        }
+    }
 
     // 1. Required streams for standard rendering with Custom Data enabled.
     static List<ParticleSystemVertexStream> RequiredStreams() => new List<ParticleSystemVertexStream>
@@ -2438,24 +2480,7 @@ public class VFXEssentialGUI : ShaderGUI
         var requiredInstanced = RequiredInstancedStreams(cdOn);
         var bad          = new List<ParticleSystemRenderer>();   // 1. Mismatches in standard rendering.
         var badInstanced = new List<ParticleSystemRenderer>();   // 2. Mismatches in Mesh GPU Instancing.
-        for (int i = 0; i < _psRenderers.Count; i++)
-        {
-            var r = _psRenderers[i];
-            if (r == null) continue;
-            bool customStreamsOn = _psCustomStreamsOn[i];
-            r.GetActiveVertexStreams(s_ActiveStreams);
-
-            if (IsMeshInstanced(r))
-            {
-                // Custom Vertex Streams off = Unity's default layout (Color, AnimFrame), which matches only when Custom Data is disabled.
-                bool ok = customStreamsOn ? InstancedStreamsMatch(requiredInstanced, s_ActiveStreams) : !cdOn;
-                if (!ok) badInstanced.Add(r);
-            }
-            else if (cdOn)
-            {
-                if (!customStreamsOn || !StreamsMatch(required, s_ActiveStreams)) bad.Add(r);
-            }
-        }
+        CollectStreamProblems(mat, bad, badInstanced);
         if (bad.Count == 0 && badInstanced.Count == 0) return;
 
         if (bad.Count > 0)
@@ -2473,8 +2498,12 @@ public class VFXEssentialGUI : ShaderGUI
             foreach (var s in requiredInstanced) names.Add(s.ToString());
             EditorGUILayout.HelpBox(
                 $"{badInstanced.Count} Particle System(s) using this material render with Mesh GPU Instancing, " +
-                "and their per-particle Vertex Streams don't match this shader. Color, Custom Data or animation frames will read garbage.\n" +
-                "Expected per-particle streams, in this order and with no others: " + string.Join(", ", names), MessageType.Warning);
+                "and their per-particle Vertex Streams don't match this shader. Unity builds the instance buffer from the " +
+                "Renderer's stream list, not from the shader, so the shader reads the wrong offsets and the mesh can appear " +
+                "frozen in place, with no error shown.\n" +
+                "Expected per-particle streams, in this order and with no others: " + string.Join(", ", names) +
+                "\nDisabling Enable Mesh GPU Instancing also hides the symptom, because each particle is then drawn with its " +
+                "own matrix, but it costs batching. Fix the streams instead.", MessageType.Warning);
         }
 
         var btn = EditorGUI.IndentedRect(EditorGUILayout.GetControlRect());
@@ -2486,6 +2515,7 @@ public class VFXEssentialGUI : ShaderGUI
             foreach (var r in bad)
             {
                 // Place required streams first in order, then append any additional existing streams unchanged.
+                SetCustomStreamsOn(r);
                 r.GetActiveVertexStreams(s_ActiveStreams);
                 var fixedStreams = new List<ParticleSystemVertexStream>(required);
                 foreach (var s in s_ActiveStreams)
@@ -2497,6 +2527,7 @@ public class VFXEssentialGUI : ShaderGUI
             {
                 // Use the mesh's own streams + the required per-particle streams; remove all other per-particle streams (any extra entry misaligns the layout).
                 // This list also satisfies case 1, so the same Particle System still works after disabling Mesh GPU Instancing.
+                SetCustomStreamsOn(r);
                 var fixedStreams = new List<ParticleSystemVertexStream>
                 {
                     ParticleSystemVertexStream.Position, ParticleSystemVertexStream.Normal, ParticleSystemVertexStream.Color,
@@ -2510,6 +2541,44 @@ public class VFXEssentialGUI : ShaderGUI
             _psRenderersTime = -1.0;   // Rescan immediately.
         }
         GUILayout.Space(4);
+    }
+
+    // Validation is only visible while a VFX material's Inspector is open. This menu runs the same check over every
+    // VFX/Essential material in the project, so a broken Particle System is reported even when nobody is looking at it.
+    [MenuItem("Tools/VFX Essential/Validate Vertex Streams")]
+    static void ValidateVertexStreamsMenu()
+    {
+        var bad          = new List<ParticleSystemRenderer>();
+        var badInstanced = new List<ParticleSystemRenderer>();
+        int problems = 0, materials = 0;
+
+        foreach (var guid in AssetDatabase.FindAssets("t:Material"))
+        {
+            var mat = AssetDatabase.LoadAssetAtPath<Material>(AssetDatabase.GUIDToAssetPath(guid));
+            if (mat == null || mat.shader == null || mat.shader.name != "VFX/Essential") continue;
+            materials++;
+            CollectStreamProblems(mat, bad, badInstanced);
+            foreach (var r in bad)
+            {
+                problems++;
+                Debug.LogWarning(
+                    "VFX Essential: Vertex Streams on '" + r.name + "' don't match material '" + mat.name + "'. " +
+                    "Custom Data reads garbage. Open the material and press Fix Vertex Streams.", r);
+            }
+            foreach (var r in badInstanced)
+            {
+                problems++;
+                Debug.LogWarning(
+                    "VFX Essential: Mesh GPU Instancing on '" + r.name + "' uses material '" + mat.name + "' but its " +
+                    "per-particle Vertex Streams don't match the shader's instance layout. The mesh can render frozen " +
+                    "in place. Open the material and press Fix Vertex Streams.", r);
+            }
+        }
+
+        if (problems == 0)
+            Debug.Log("VFX Essential: checked " + materials + " material(s), all Vertex Streams match.");
+        else
+            Debug.LogWarning("VFX Essential: " + problems + " problem(s) across " + materials + " material(s).");
     }
 
     // NOTE: BuildCDUsers() (conflict detection) and DrawCustomDataSummary() (the Custom Data Map) each keep their own

@@ -303,9 +303,11 @@ Two functions keep their own list of bindings: `BuildCDUsers()` (finds channels 
 ### Vertex Streams check
 
 - It scans loaded scenes (inactive objects included) for Particle System Renderers whose shared material is the first selected material, at most once per second. It does not look at prefabs that are not in a scene.
-- Non-instanced renderers are checked only when Custom Data is enabled. Renderers that actually render with Mesh GPU Instancing (`renderMode == Mesh`, `enableGPUInstancing`, and `supportsMeshInstancing`) are always checked.
-- Fixing a non-instanced renderer puts the required streams first and keeps the others after them. Fixing an instanced renderer rebuilds the list (`Position, Normal, Color, UV, UV2`, then the required per-particle streams) and drops everything else, because an extra per-particle stream would shift the layout.
+- Non-instanced renderers are checked only when Custom Data is enabled. Renderers that render with Mesh GPU Instancing (`renderMode == Mesh` and `enableGPUInstancing`) are always checked, whatever `supportsMeshInstancing` reports. That property is a capability hint, not the active path: it reads `false` on renderers that still render instanced, and gating on it hid the exact renderers that were broken.
+- `CollectStreamProblems()` holds the rules and takes no GUI dependency, so `DrawVertexStreamCheck()` and the **Tools > VFX Essential > Validate Vertex Streams** menu item share one implementation. The menu checks every `VFX/Essential` material in the project and logs a warning per broken Renderer, so a mismatch is reported without opening the material.
+- Fixing a non-instanced renderer puts the required streams first and keeps the others after them. Fixing an instanced renderer rebuilds the list (`Position, Normal, Color, UV, UV2`, then the required per-particle streams) and drops everything else, because an extra per-particle stream would shift the layout. Both fixes also turn *Custom Vertex Streams* on, since the toggle being off is itself a mismatch when Custom Data is enabled.
 - `ParticleSystemRenderer.GetActiveVertexStreams()` returns the last stored list even when *Custom Vertex Streams* is unchecked, so the script reads the serialized `m_UseCustomVertexStreams` flag separately.
+- Turning *Enable Mesh GPU Instancing* off also makes the symptom disappear, because each particle is then drawn with its own matrix and the instance buffer is not read at all. That is a workaround, not a fix: it loses batching. Fix the streams instead.
 
 ## 8. Common tasks
 
