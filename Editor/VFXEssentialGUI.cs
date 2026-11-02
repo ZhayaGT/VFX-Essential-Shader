@@ -578,6 +578,37 @@ public class VFXEssentialGUI : ShaderGUI
     static readonly string[] UVModeOptions = { "UV1", "UV2", "Screen" };
 
     static readonly int s_TexPickerHash = "TexPicker".GetHashCode();
+    static readonly int s_TexPickerButtonHash = "TexPickerButton".GetHashCode();
+
+    // Texture the slot had when the picker opened: cancelling the picker reports a null object,
+    // which must not wipe the slot.
+    static Texture s_PickerOriginal;
+
+    // Result of EditorGUIUtility.ShowObjectPicker<Texture>() for a texture slot.
+    // "ObjectSelectorUpdated" fires on every selection change (live preview), "ObjectSelectorClosed" on accept/cancel.
+    static void HandleTexturePicker(MaterialEditor editor, MaterialProperty texProp, int pickerId)
+    {
+        var evt = Event.current;
+        if (evt == null || evt.type != EventType.ExecuteCommand) return;
+        if (EditorGUIUtility.GetObjectPickerControlID() != pickerId) return;
+        if (evt.commandName != "ObjectSelectorUpdated" && evt.commandName != "ObjectSelectorClosed")
+            return;
+
+        var picked = EditorGUIUtility.GetObjectPickerObject() as Texture;
+        if (picked == null && evt.commandName == "ObjectSelectorClosed")
+            picked = s_PickerOriginal; // cancelled -> keep what the slot had
+
+        ApplyPickedTexture(editor, texProp, picked);
+        evt.Use();
+    }
+
+    static void ApplyPickedTexture(MaterialEditor editor, MaterialProperty texProp, Texture tex)
+    {
+        if (texProp.textureValue == tex) return;
+        editor.RegisterPropertyChangeUndo(texProp.name);
+        texProp.textureValue = tex;
+        editor.Repaint();
+    }
 
     static void DrawTextureBlock(
         MaterialEditor editor, MaterialProperty texProp, string label,
@@ -640,19 +671,21 @@ public class VFXEssentialGUI : ShaderGUI
         EditorGUI.DrawRect(new Rect(sqRect.x, sqRect.y, 1f, sqRect.height), bc);
         EditorGUI.DrawRect(new Rect(sqRect.xMax - 1f, sqRect.y, 1f, sqRect.height), bc);
 
-        // Select button (overlay at the bottom right).
+        // Select button (overlay at the bottom right) -> opens Unity's asset picker.
         const float selW = 49f, selH = 12f;
         var selRect = new Rect(sqRect.xMax - selW + 1f, sqRect.yMax - selH, selW, selH);
-        if (GUI.Button(selRect, "Select", EditorStyles.miniButton))
+        int pickerId = GUIUtility.GetControlID(s_TexPickerButtonHash, FocusType.Passive, selRect);
+        if (GUI.Button(selRect, new GUIContent("Select",
+                "Pick a texture asset from the Project window (search by name, no drag and drop needed)."),
+                EditorStyles.miniButton))
         {
-            var sel = Selection.activeObject as Texture2D;
-            if (sel != null)
-            {
-                editor.RegisterPropertyChangeUndo(texProp.name);
-                texProp.textureValue = sel;
-                editor.Repaint();
-            }
+            s_PickerOriginal = texProp.textureValue;
+            EditorGUIUtility.ShowObjectPicker<Texture>(texProp.textureValue, false, "t:Texture2D", pickerId);
+            GUIUtility.keyboardControl = id;
         }
+
+        // Live result of the picker: preview while browsing, commit when it closes.
+        HandleTexturePicker(editor, texProp, pickerId);
 
         // Click the texture area -> locate the texture in the Project window and acquire keyboard focus.
         if (evt.type == EventType.MouseDown && evt.button == 0 &&
