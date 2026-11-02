@@ -1058,5 +1058,145 @@
 
             ENDHLSL
         }
+
+        // ── Scene view selection outline ────────────────────────────────────────
+        // Unity draws the orange selection outline from a pass tagged SceneSelectionPass. Without one it falls back to a
+        // shader that has no per-particle transform, so the outline lands on the Particle System's origin (or on a single
+        // mesh instance) instead of on the particles. This pass repeats the instancing setup of the forward pass so the
+        // outline follows every particle. Vertex Offset is not applied here, matching URP's own particle shaders.
+        Pass
+        {
+            Name "SceneSelectionPass"
+            Tags { "LightMode" = "SceneSelectionPass" }
+
+            Blend One Zero
+            ZWrite On
+            ZTest LEqual
+            Cull Off
+            ColorMask RGBA
+
+            HLSLPROGRAM
+
+            #pragma vertex   vertEditor
+            #pragma fragment fragSelection
+            #pragma multi_compile_instancing
+            #pragma instancing_options procedural:ParticleInstancingSetup
+            #pragma shader_feature_local _USECUSTOMDATA_ON
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+            // Same instance layout as the forward pass; see the comment there.
+            #ifdef _USECUSTOMDATA_ON
+                #define UNITY_PARTICLE_INSTANCE_DATA VFXParticleInstanceData
+                struct VFXParticleInstanceData
+                {
+                    float3x4 transform;
+                    uint     color;
+                    float4   custom1;
+                    float4   custom2;
+                    float    animFrame;
+                };
+            #endif
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/ParticlesInstancing.hlsl"
+
+            float _ObjectId;
+            float _PassValue;
+
+            struct EditorAttributes
+            {
+                float4 positionOS : POSITION;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
+
+            struct EditorVaryings
+            {
+                float4 positionCS : SV_POSITION;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
+
+            EditorVaryings vertEditor(EditorAttributes IN)
+            {
+                EditorVaryings OUT;
+                UNITY_SETUP_INSTANCE_ID(IN);
+                UNITY_TRANSFER_INSTANCE_ID(IN, OUT);
+                OUT.positionCS = TransformObjectToHClip(IN.positionOS.xyz);
+                return OUT;
+            }
+
+            float4 fragSelection(EditorVaryings IN) : SV_Target
+            {
+                UNITY_SETUP_INSTANCE_ID(IN);
+                return float4(_ObjectId, _PassValue, 1.0, 1.0);
+            }
+
+            ENDHLSL
+        }
+
+        // ── Scene picking (click selection in the Scene view) ───────────────────
+        Pass
+        {
+            Name "ScenePickingPass"
+            Tags { "LightMode" = "Picking" }
+
+            Blend One Zero
+            ZWrite On
+            ZTest LEqual
+            Cull Off
+            ColorMask RGBA
+
+            HLSLPROGRAM
+
+            #pragma vertex   vertEditor
+            #pragma fragment fragPicking
+            #pragma multi_compile_instancing
+            #pragma instancing_options procedural:ParticleInstancingSetup
+            #pragma shader_feature_local _USECUSTOMDATA_ON
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+            #ifdef _USECUSTOMDATA_ON
+                #define UNITY_PARTICLE_INSTANCE_DATA VFXParticleInstanceData
+                struct VFXParticleInstanceData
+                {
+                    float3x4 transform;
+                    uint     color;
+                    float4   custom1;
+                    float4   custom2;
+                    float    animFrame;
+                };
+            #endif
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/ParticlesInstancing.hlsl"
+
+            float4 _SelectionID;
+
+            struct EditorAttributes
+            {
+                float4 positionOS : POSITION;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
+
+            struct EditorVaryings
+            {
+                float4 positionCS : SV_POSITION;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
+
+            EditorVaryings vertEditor(EditorAttributes IN)
+            {
+                EditorVaryings OUT;
+                UNITY_SETUP_INSTANCE_ID(IN);
+                UNITY_TRANSFER_INSTANCE_ID(IN, OUT);
+                OUT.positionCS = TransformObjectToHClip(IN.positionOS.xyz);
+                return OUT;
+            }
+
+            float4 fragPicking(EditorVaryings IN) : SV_Target
+            {
+                UNITY_SETUP_INSTANCE_ID(IN);
+                return _SelectionID;
+            }
+
+            ENDHLSL
+        }
     }
 }

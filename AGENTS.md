@@ -24,7 +24,7 @@ Statements below describe the **current implementation** unless they are marked 
 
 - A general-purpose, unlit effects shader for Unity's Universal Render Pipeline (URP 17, Unity 6, Forward path).
 - Designed for the built-in Particle System (Shuriken). It also works on a Mesh Renderer.
-- One transparent pass. The optional modules (Diffuse 2, Mask, Dissolve, Distortion, Vertex Offset, Rim, Depth) are compiled in or out with shader keywords. Diffuse 1, Tint Color, Emission Scaler, Saturation, and Contrast always run; Wrap Mode, speed toggles, and a few options are plain numeric properties, not keywords.
+- One transparent rendering pass, plus two editor-only passes (`SceneSelectionPass`, `ScenePickingPass`) that exist for the Scene view outline and click-selection. The optional modules (Diffuse 2, Mask, Dissolve, Distortion, Vertex Offset, Rim, Depth) are compiled in or out with shader keywords. Diffuse 1, Tint Color, Emission Scaler, Saturation, and Contrast always run; Wrap Mode, speed toggles, and a few options are plain numeric properties, not keywords.
 - The Inspector is hand-written (IMGUI) and is part of the product. The shader is meant to be driven by artists, so a property that exists in the shader but is not drawn by the Inspector is effectively invisible.
 - The prototype was assembled by the author in a node-based shader editor. This release is a hand-written HLSL rewrite of that prototype. Some property names still reflect the prototype (see [Pitfalls](#10-pitfalls)).
 
@@ -244,6 +244,13 @@ Without Custom Data, `TEXCOORD1` carries the mesh's second UV set instead. Where
 - **Rule:** the struct layout must equal the order of the per-particle streams in the Renderer's stream list, with no extra per-particle streams. Without Custom Data the shader uses URP's default struct (`transform, color, animFrame`), matching the streams `Color, AnimFrame`. With Custom Data it defines `VFXParticleInstanceData` (`transform, color, custom1, custom2, animFrame`), matching `Color, Custom1.xyzw, Custom2.xyzw, AnimFrame`.
 - Color is multiplied by the mesh's vertex color when the mesh has one (`unity_ParticleUseMeshColors`), and Texture Sheet Animation is applied to UV1 in the shader from `animFrame` and `unity_ParticleUVShiftData`.
 - A mismatch produces no error, only garbage. The Inspector's Vertex Streams check (`RequiredStreams`, `RequiredInstancedStreams`, `DrawVertexStreamCheck`) detects it and offers a one-click fix. **If you change the vertex inputs or the instance struct, change those functions too.**
+
+### Editor passes (selection outline and picking)
+
+- The shader has three passes: `ForwardUnlit` (`UniversalForward`), `SceneSelectionPass`, and `ScenePickingPass` (`Picking`). The two editor passes exist only so the Scene view can outline and click-select the actual particles.
+- **Rule:** both editor passes must repeat `#pragma multi_compile_instancing`, `#pragma instancing_options procedural:ParticleInstancingSetup`, and the same `VFXParticleInstanceData` definition as the forward pass. Without the procedural setup, the passes have no per-particle transform and Unity draws every particle on top of the Particle System's origin, so the orange outline lands on the GameObject pivot instead of on the particles.
+- Neither editor pass applies Vertex Offset or samples textures; they write a flat ID colour, matching URP's own particle shaders.
+- `VFX/Essential` is transparent (`Queue` = Transparent) but these passes write depth and ignore the material's blend state, so the outline is a solid mask rather than an alpha-blended shape.
 
 ### The constant buffer
 
